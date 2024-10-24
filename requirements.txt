@@ -1,0 +1,6 @@
+openai 
+youtube-transcript-api
+langchain 
+streamlit
+langchain_community
+ langchain-openai
