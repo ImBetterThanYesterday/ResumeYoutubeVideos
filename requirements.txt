@@ -1,4 +1,7 @@
-youtube-transcript-api
-langchain 
 streamlit
+langchain
+langchain-openai
 langchain_community
+youtube-transcript-api
+python-dotenv
+ollama
