@@ -1,86 +1,226 @@
-import openai
 from youtube_transcript_api import YouTubeTranscriptApi
 import streamlit as st
 from langchain.prompts import PromptTemplate
-from langchain.llms import OpenAI
+from langchain.llms import Ollama
+from langchain_openai import ChatOpenAI
 from langchain.chains import LLMChain
 from dotenv import load_dotenv
 import os
+from typing import Optional
 
 load_dotenv()
 
-# Función para dividir la transcripción en fragmentos más pequeños
-def split_transcript(transcript, max_tokens=2000):
+class ModelManager:
+    """Gestiona diferentes modelos de lenguaje"""
+    
+    @staticmethod
+    def get_model(model_type: str, model_name: Optional[str] = None):
+        """
+        Retorna una instancia del modelo seleccionado
+        Args:
+            model_type: 'ollama' o 'openai'
+            model_name: nombre específico del modelo
+        """
+        if model_type == "ollama":
+            return Ollama(model=model_name or "granite3-moe:1b")
+        elif model_type == "openai":
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                raise ValueError("OpenAI API key not found in environment variables")
+            return ChatOpenAI(model=model_name or "gpt-3.5-turbo", api_key=api_key)
+        else:
+            raise ValueError(f"Unsupported model type: {model_type}")
+
+def split_transcript(transcript: str, max_tokens: int = 2000) -> list:
+    """Divide la transcripción en fragmentos más pequeños"""
     words = transcript.split()
     chunks = []
     current_chunk = []
     current_length = 0
     
     for word in words:
-        current_length += len(word) + 1  # Agregar la longitud de la palabra más el espacio
+        current_length += len(word) + 1
         if current_length > max_tokens:
             chunks.append(" ".join(current_chunk))
             current_chunk = []
             current_length = 0
         current_chunk.append(word)
     
-    # Agregar el último fragmento
     if current_chunk:
         chunks.append(" ".join(current_chunk))
     
     return chunks
 
-# Función para obtener la transcripción del video de YouTube
-def get_youtube_transcript(video_id):
+def get_youtube_transcript(video_id: str) -> str:
+    """Obtiene la transcripción del video de YouTube"""
     transcript = YouTubeTranscriptApi.get_transcript(video_id)
-    text = " ".join([item['text'] for item in transcript])
-    return text
+    return " ".join([item['text'] for item in transcript])
 
-# Función para generar resumen usando LangChain
-def summarize_transcript(transcript):
-    # Crear un prompt con LangChain
-    prompt_template = "Summarize the following video transcript in an engaging and concise way:\n\n{transcript}"
-    prompt = PromptTemplate(input_variables=["transcript"], template=prompt_template)
-    
-    openai_api_key = os.getenv("OPENAI_API_KEY")  # Obtener la clave desde el archivo .env
-    llm = OpenAI(temperature=0.7, openai_api_key=openai_api_key)
-    
-    # Usar OpenAI con LangChain para generar el resumen
+def process_text(text: str, prompt_template: str, model_type: str, model_name: str) -> str:
+    """Procesa texto usando el modelo seleccionado"""
+    prompt = PromptTemplate(input_variables=["text"], template=prompt_template)
+    llm = ModelManager.get_model(model_type, model_name)
     chain = LLMChain(llm=llm, prompt=prompt)
     
-    # Dividir la transcripción en fragmentos más pequeños
-    chunks = split_transcript(transcript)
+    chunks = split_transcript(text)
+    results = [chain.run(text=chunk) for chunk in chunks]
+    return " ".join(results)
+
+def summarize_transcript(transcript: str, model_type: str, model_name: str) -> str:
+    """Genera resumen del texto"""
+    prompt_template = """
+    Summarize the following video transcript in an engaging and concise way. 
+    Include the main points and key takeaways:
+
+    {text}
+    """
+    return process_text(transcript, prompt_template, model_type, model_name)
+
+def translate_summary(summary: str, language: str, model_type: str, model_name: str) -> str:
+    """Traduce el resumen al idioma seleccionado"""
+    prompt_template = f"""
+    Translate the following text to {language}, maintaining its meaning and style:
+
+    {{text}}
+    """
+    return process_text(summary, prompt_template, model_type, model_name)
+
+# Configuración de Streamlit
+st.title("YouTube Video Summarizer and Translator")
+
+# Toggle para cambiar entre "Modo Predeterminado" y "Modo Custom"
+mode = st.radio("Select Mode", ["Simple Mode", "Custom Mode"], horizontal=True)
+
+# Modo sencillo: Solo URL y botón "Generate Summary"
+if mode == "Simple Mode":
+    video_url = st.text_input("Enter the YouTube video URL:")
     
-    # Generar resumen para cada fragmento y concatenar los resúmenes
-    summaries = [chain.run(transcript=chunk) for chunk in chunks]
-    full_summary = " ".join(summaries)
+    # Session state para almacenar el resumen
+    if 'transcript' not in st.session_state:
+        st.session_state['transcript'] = None
+    if 'summary' not in st.session_state:
+        st.session_state['summary'] = None
+    if 'translation' not in st.session_state:
+        st.session_state['translation'] = None
     
-    return full_summary
+    # Botón para generar resumen
+    if st.button("Generate Summary"):
+        try:
+            with st.spinner("Getting transcript..."):
+                video_id = video_url.split('v=')[1]
+                st.session_state['transcript'] = get_youtube_transcript(video_id)
+            
+            with st.spinner("Generating summary..."):
+                st.session_state['summary'] = summarize_transcript(
+                    st.session_state['transcript'],
+                    "openai",  # Puedes cambiar el modelo predeterminado aquí
+                    "gpt-3.5-turbo"
+                )
+            st.session_state['translation'] = None
+        except Exception as e:
+            st.error(f"Error processing video: {str(e)}")
 
-# Streamlit: Crear la interfaz de usuario
-st.title("YouTube Video Summarizer")
+    # Mostrar resultados
+    if st.session_state['summary']:
+        st.subheader("Summary (English):")
+        st.write(st.session_state['summary'])
 
-# Input para la URL del video de YouTube
-video_url = st.text_input("Enter the YouTube video URL:")
+        # Mostrar el selector de idioma y el botón de traducción después de generar el resumen
+        language = st.selectbox(
+            "Select Language for Translation",
+            ["Spanish", "French", "German", "Chinese", "Japanese"],
+            help="Choose the language to translate the summary into"
+        )
 
-if st.button("Generate Summary"):
-    try:
-        # Extraer ID del video de YouTube
-        video_id = video_url.split('v=')[1]
-        
-        # Obtener transcripción
-        transcript = get_youtube_transcript(video_id)
-        
-        # Mostrar la transcripción (opcional)
-        st.subheader("Transcript:")
-        st.write(transcript)
-        
-        # Generar resumen
-        summary = summarize_transcript(transcript)
-        
-        # Mostrar el resumen
-        st.subheader("Summary:")
-        st.write(summary)
-        
-    except Exception as e:
-        st.error(f"Error processing video: {e}")
+        # Botón para traducir
+        if st.button("Translate Summary"):
+            try:
+                with st.spinner("Translating..."):
+                    st.session_state['translation'] = translate_summary(
+                        st.session_state['summary'],
+                        language,
+                        "openai",  # Puedes cambiar el modelo predeterminado aquí
+                        "gpt-3.5-turbo"
+                    )
+            except Exception as e:
+                st.error(f"Error translating: {str(e)}")
+
+    if st.session_state['translation']:
+        st.subheader(f"Translation ({language}):")
+        st.write(st.session_state['translation'])
+
+# Modo Custom: Mostrar toda la interfaz
+if mode == "Custom Mode":
+    # Selección de modelo
+    model_type = st.selectbox(
+        "Select Model Type",
+        ["ollama", "openai"],
+        help="Choose the AI model service you want to use"
+    )
+
+    # Opciones específicas de modelo según el tipo seleccionado
+    if model_type == "ollama":
+        model_name = st.selectbox(
+            "Select Ollama Model",
+            ["granite3-moe:1b", "llama2", "mistral"],
+            help="Choose the specific Ollama model"
+        )
+    else:  # openai
+        model_name = st.selectbox(
+            "Select OpenAI Model",
+            ["gpt-3.5-turbo", "gpt-4"],
+            help="Choose the specific OpenAI model"
+        )
+
+    # Input para la URL
+    video_url = st.text_input("Enter the YouTube video URL:")
+
+    # Botón para generar resumen
+    if st.button("Generate Summary"):
+        try:
+            with st.spinner("Getting transcript..."):
+                video_id = video_url.split('v=')[1]
+                st.session_state['transcript'] = get_youtube_transcript(video_id)
+            
+            with st.spinner("Generating summary..."):
+                st.session_state['summary'] = summarize_transcript(
+                    st.session_state['transcript'],
+                    model_type,
+                    model_name
+                )
+            st.session_state['translation'] = None
+        except Exception as e:
+            st.error(f"Error processing video: {str(e)}")
+
+    # Mostrar resultados
+    if st.session_state['transcript']:
+        with st.expander("Show Transcript"):
+            st.write(st.session_state['transcript'])
+
+    if st.session_state['summary']:
+        st.subheader("Summary (English):")
+        st.write(st.session_state['summary'])
+
+        # Mostrar el selector de idioma y el botón de traducción después de generar el resumen
+        language = st.selectbox(
+            "Select Language for Translation",
+            ["Spanish", "French", "German", "Chinese", "Japanese"],
+            help="Choose the language to translate the summary into"
+        )
+
+        # Botón para traducir
+        if st.button("Translate Summary"):
+            try:
+                with st.spinner("Translating..."):
+                    st.session_state['translation'] = translate_summary(
+                        st.session_state['summary'],
+                        language,
+                        model_type,
+                        model_name
+                    )
+            except Exception as e:
+                st.error(f"Error translating: {str(e)}")
+
+    if st.session_state['translation']:
+        st.subheader(f"Translation ({language}):")
+        st.write(st.session_state['translation'])
